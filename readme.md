@@ -11,8 +11,8 @@ Developers expose APIs securely using Solana for access control. Users purchase 
 ### For API Developers
 
 ```bash
-# 1. Register your API
-curl -X POST http://localhost:3001/register \
+# 1. Register your API via dashboard
+curl -X POST http://localhost:3001/api/register \
   -H "Content-Type: application/json" \
   -d '{"name": "MyAPI", "backendUrl": "https://api.example.com", "pricePerCall": "1000"}'
 
@@ -20,7 +20,7 @@ curl -X POST http://localhost:3001/register \
 # Users mint NFT access key → make requests with signature
 
 # 3. Withdraw earnings
-curl -X POST http://localhost:3001/withdraw \
+curl -X POST http://localhost:3001/api/withdraw \
   -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
@@ -45,7 +45,29 @@ curl -X GET http://localhost:3001/api/YOUR_API_ID/data \
 ✅ **Zero Intermediaries** - Payments go directly to developer wallets  
 ✅ **Rate Limiting** - Per-key request quotas enforced  
 ✅ **Developer Dashboard** - Register APIs, manage keys, view analytics  
-✅ **Devnet Ready** - Deploy instantly, zero infrastructure overhead  
+✅ **Devnet Ready** - Deployed via Solana Playground, zero setup  
+
+---
+
+## Smart Contract (Deployed on Devnet)
+
+**Program ID:** `HRhuJDBenXrraLRfEQpFxNKkMBDbBXmjfKguyFGsxrAL`
+
+Built with **Anchor Rust** on **Solana Playground**.
+
+### Contract Functions
+
+- `register_api` - Developer registers new API
+- `purchase_access` - User buys API access key (transfers SOL)
+- `log_usage` - Gateway logs API usage
+- `withdraw_earnings` - Developer withdraws accumulated fees
+- `revoke_access` - Developer revokes user access
+- `pause_api` - Developer pauses API
+- `unpause_api` - Developer unpauses API
+
+### IDL Available
+
+IDL generated at deployment. Use with `@coral-xyz/anchor` for TypeScript clients.
 
 ---
 
@@ -60,7 +82,8 @@ curl -X GET http://localhost:3001/api/YOUR_API_ID/data \
          ▼
 ┌─────────────────────────────┐
 │  Solana Smart Contract      │
-│  (Seahorse - Devnet)        │
+│  (Anchor - Devnet)          │
+│  Program: N9kP3yt3...       │
 └─────────────────────────────┘
          ▲
          │ Verify NFT Ownership
@@ -92,29 +115,51 @@ curl -X GET http://localhost:3001/api/YOUR_API_ID/data \
 
 ```
 tokengate/
-├── program/              # Solana Seahorse Smart Contract
-│   ├── src/
-│   │   ├── api_gateway.py
-│   │   ├── state.py
-│   │   └── instructions.py
-│   └── Cargo.toml
+├── program/                  # Anchor Rust Smart Contract
+│   ├── programs/
+│   │   └── tokengate/
+│   │       ├── src/
+│   │       │   ├── lib.rs
+│   │       │   ├── instructions/
+│   │       │   │   ├── mod.rs
+│   │       │   │   ├── register_api.rs
+│   │       │   │   ├── purchase_access.rs
+│   │       │   │   ├── log_usage.rs
+│   │       │   │   ├── withdraw_earnings.rs
+│   │       │   │   ├── revoke_access.rs
+│   │       │   │   ├── pause_api.rs
+│   │       │   │   └── unpause_api.rs
+│   │       └── src/state/
+│   │           ├── mod.rs
+│   │           ├── api_registry.rs
+│   │           ├── access_key.rs
+│   │           └── usage_log.rs
+│   ├── tests/
+│   └── Anchor.toml
 │
-├── gateway/              # Express.js API Gateway
+├── gateway/                  # Express.js API Gateway
 │   ├── src/
 │   │   ├── index.ts
 │   │   ├── middleware/
+│   │   │   ├── auth.ts
+│   │   │   └── rateLimiter.ts
 │   │   ├── services/
-│   │   └── routes/
+│   │   │   ├── solana.ts
+│   │   │   └── logger.ts
+│   │   ├── routes/
+│   │   │   ├── api.ts
+│   │   │   └── health.ts
+│   │   └── config.ts
 │   └── package.json
 │
-├── dashboard/            # React Dashboard
+├── dashboard/                # React Dashboard
 │   ├── src/
 │   │   ├── pages/
 │   │   ├── components/
 │   │   └── hooks/
 │   └── package.json
 │
-├── docs/                 # Documentation
+├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── API_REFERENCE.md
 │   └── DEPLOYMENT.md
@@ -124,22 +169,19 @@ tokengate/
 
 ---
 
-## Installation
+## Setup & Deployment
 
-### Prerequisites
-- Node.js 18+
-- Solana CLI (or use Solana Playground for contract)
-- Phantom Wallet (devnet funded)
+### Smart Contract (Already Deployed)
 
-### Smart Contract Deployment
+Contract deployed on **Solana Devnet** via Solana Playground.
 
+- **Program ID:** `N9kP3yt3rd1oc83rRsgtwXsJqyUHZz7ZK9SWawQtP5y`
+- **RPC:** https://api.devnet.solana.com
+- **Built with:** Anchor Rust
+
+To redeploy locally:
 ```bash
 cd program
-
-# Option 1: Use Solana Playground (recommended for MVP)
-# Copy code to playground.solana.com, deploy directly
-
-# Option 2: Local deployment
 anchor build
 anchor deploy --provider.cluster devnet
 ```
@@ -153,8 +195,8 @@ npm install
 cp .env.example .env
 
 # Update .env with:
-# SOLANA_RPC_URL=https://api.devnet.solana.com
-# PROGRAM_ID=YOUR_DEPLOYED_PROGRAM_ID
+SOLANA_RPC_URL=https://api.devnet.solana.com
+PROGRAM_ID=N9kP3yt3rd1oc83rRsgtwXsJqyUHZz7ZK9SWawQtP5y
 
 npm run dev
 # Gateway running on http://localhost:3001
@@ -169,8 +211,8 @@ npm install
 cp .env.example .env
 
 # Update .env with:
-# REACT_APP_GATEWAY_URL=http://localhost:3001
-# REACT_APP_PROGRAM_ID=YOUR_DEPLOYED_PROGRAM_ID
+REACT_APP_GATEWAY_URL=http://localhost:3001
+REACT_APP_PROGRAM_ID=N9kP3yt3rd1oc83rRsgtwXsJqyUHZz7ZK9SWawQtP5y
 
 npm run dev
 # Dashboard running on http://localhost:3000
@@ -254,7 +296,7 @@ const response = await fetch('http://localhost:3001/api/register', {
     name: 'Weather API',
     backendUrl: 'https://weather-api.example.com',
     rateLimit: 100,
-    pricePerCall: 5000 // 5000 lamports per request
+    pricePerCall: 5000
   })
 });
 ```
@@ -263,7 +305,7 @@ const response = await fetch('http://localhost:3001/api/register', {
 
 - User connects Phantom wallet to dashboard
 - Clicks "Buy API Access"
-- Mints NFT key (payment sent to developer)
+- Signs transaction (mints access key, transfers SOL to developer)
 - Receives API key
 
 ### 3. User Makes Request
@@ -271,7 +313,7 @@ const response = await fetch('http://localhost:3001/api/register', {
 ```bash
 curl -X GET http://localhost:3001/api/weather-api/forecast \
   -H "X-Wallet: 9B5X1WNY8R2qK7ZmP3vJ5tQ6hL8nF4dE2bC9aG1sH" \
-  -H "X-Signature: $(solana-keygen sign-message 'request-123' --signer ~/.config/solana/id.json)"
+  -H "X-Signature: YOUR_MESSAGE_SIGNATURE"
 
 # Gateway:
 # 1. Verifies signature
@@ -289,39 +331,33 @@ curl -X GET http://localhost:3001/api/weather-api/forecast \
 ### Running Tests
 
 ```bash
-# Contract tests
+# Smart Contract Tests
 cd program
 anchor test
 
-# Gateway tests
+# Gateway Tests
 cd gateway
 npm test
 
-# E2E tests
+# E2E Tests
 npm run test:e2e
 ```
 
-### Local Devnet
+### Local Testing
 
-```bash
-# Option 1: Use Solana Playground (recommended)
-# No local setup needed
-
-# Option 2: Run local validator
-solana-test-validator
-```
+1. Use Devnet (no local validator needed)
+2. Fund test wallets with Devnet SOL: `solana airdrop 2 YOUR_ADDRESS --url devnet`
+3. Use Phantom wallet connected to Devnet
 
 ---
 
 ## Deployment
 
-### Mainnet Deployment
-See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for production setup.
+### Current Status
 
-**Quick deployment for hackathon:**
-- Smart Contract: Already on Devnet via Solana Playground
-- Gateway: Deploy to Vercel/Railway (1-click)
-- Dashboard: Deploy to Vercel
+- ✅ Smart Contract: Deployed on Devnet
+- ⏳ Gateway: Ready for deployment to Vercel/Railway
+- ⏳ Dashboard: Ready for deployment to Vercel
 
 ---
 
@@ -329,35 +365,14 @@ See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for production setup.
 
 | Component | Technology |
 |-----------|-----------|
-| Smart Contract | Seahorse (Python → Solana) |
+| Smart Contract | Anchor Rust |
+| Contract Deployment | Solana Playground + Devnet |
 | Gateway | Node.js + Express.js + TypeScript |
 | Frontend | React + Next.js |
 | RPC | Solana Devnet |
 | Rate Limiter | express-rate-limit |
 | Wallet | @solana/wallet-adapter-react |
 | Styling | Tailwind CSS |
-
----
-
-## Roadmap
-
-**MVP (v0.1)** - ✅ Complete
-- Basic API registration
-- NFT-gated access
-- Simple rate limiting
-- Devnet deployment
-
-**v0.2 - Post Hackathon**
-- Multi-tier pricing
-- Advanced analytics
-- Custom rate limit policies
-- Mainnet support
-
-**v1.0**
-- Revenue sharing
-- Governance token
-- DAO treasury
-- Custom domains for gateways
 
 ---
 
@@ -386,6 +401,8 @@ MIT License - See [LICENSE](LICENSE) file for details
 - Steps to reproduce
 - Environment (OS, Node version, etc.)
 
+**Questions?** Check [docs/](docs/) or ask in repo discussions.
+
 ---
 
 ## Built for Solana Cypherpunk Hackathon 2025
@@ -394,7 +411,7 @@ MIT License - See [LICENSE](LICENSE) file for details
 
 **Links:**
 - [Solana Playground](https://playground.solana.com)
-- [Seahorse Docs](https://seahorse.dev)
+- [Anchor Docs](https://book.anchor-lang.com)
 - [Solana Docs](https://docs.solana.com)
 
 ---
