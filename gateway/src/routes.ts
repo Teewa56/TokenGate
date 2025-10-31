@@ -1,34 +1,27 @@
 import { Router, Response } from 'express';
-import { Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { Keypair, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
 import { GatewayRequest } from './types';
 import {
   verifySignature,
-  checkAccess,
-  logUsageOnChain,
   isValidSolanaAddress,
   generateApiId,
 } from './utils';
 import { checkRateLimit } from './middleware/rateLimiter';
+import {
+  registerApiOnChain,
+  purchaseAccessOnChain,
+  logUsageOnChain,
+  verifyAccessKeyOnChain,
+  getApiRegistry,
+  getAccessKey,
+  deriveRegistryPda,
+  deriveAccessKeyPda,
+} from './services/solana';
 
 const router = Router();
 
-// ============================================================================
-// TYPES
-// ============================================================================
-
-interface ApiRegistration {
-  [key: string]: {
-    name: string;
-    backendUrl: string;
-    rateLimit: number;
-    pricePerCall: number;
-    owner: string;
-    createdAt: string;
-  };
-}
-
-// In-memory storage for MVP
-const apiRegistry: ApiRegistration = {};
+// In-memory storage for MVP (maps API name to registry PDA)
+const apiRegistry: { [key: string]: string } = {};
 
 // ============================================================================
 // ROUTES
@@ -38,19 +31,26 @@ const apiRegistry: ApiRegistration = {};
  * Health check endpoint
  */
 router.get('/health', (req: GatewayRequest, res: Response): void => {
-    res.json({
-        status: 'ok',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-    });
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
 });
 
 /**
- * Register new API
+ * Register new API (calls smart contract)
  */
-router.post('/register', (req: GatewayRequest, res: Response): void => {
+router.post('/api/register', async (req: GatewayRequest, res: Response): Promise<void> => {
   try {
-    const { name, backendUrl, rateLimit, pricePerCall, owner } = req.body;
+    const { name, backendUrl, rateLimit, pricePerCall } = req.body;
+    const wallet = req.wallet;
+
+    // Validation: wallet
+    if (!wallet || !isValidSolanaAddress(wallet)) {
+      res.status(401).json({ error: 'Valid wallet required (X-Wallet header)' });
+      return;
+    }
 
     // Validation: name
     if (!name || typeof name !== 'string' || name.length > 64 || name.length === 0) {
@@ -88,51 +88,48 @@ router.post('/register', (req: GatewayRequest, res: Response): void => {
       return;
     }
 
-    // Validation: owner (wallet address)
-    if (!owner || !isValidSolanaAddress(owner)) {
-      res.status(400).json({ error: 'Invalid owner wallet address' });
-      return;
-    }
+    const ownerPubkey = new PublicKey(wallet);
 
-    // Generate API ID
-    const apiId = generateApiId();
-
-    // Store in registry
-    apiRegistry[apiId] = {
+    // Call smart contract to register API
+    const registryPda = await registerApiOnChain(
+      ownerPubkey,
       name,
       backendUrl,
       rateLimit,
-      pricePerCall,
-      owner,
-      createdAt: new Date().toISOString(),
-    };
+      pricePerCall
+    );
 
-    console.log(`[REGISTER] API: ${name}, ID: ${apiId}, Owner: ${owner}`);
+    // Store mapping
+    apiRegistry[name] = registryPda;
+
+    console.log(`[REGISTER] API: ${name}, Registry PDA: ${registryPda}, Owner: ${wallet}`);
 
     res.status(201).json({
-      apiId,
+      apiId: registryPda,
       name,
       backendUrl,
       rateLimit,
       pricePerCall,
-      owner,
-      createdAt: apiRegistry[apiId].createdAt,
+      owner: wallet,
+      createdAt: new Date().toISOString(),
+      message: 'API registered on-chain. Sign the transaction to complete registration.',
     });
   } catch (error: unknown) {
     console.error('Registration error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    const message = error instanceof Error ? error.message : 'Internal server error';
+    res.status(500).json({ error: message });
   }
 });
 
 /**
- * Purchase API access
+ * Purchase API access (calls smart contract)
  */
-router.post('/purchase', async (req: GatewayRequest, res: Response): Promise<void> => {
+router.post('/api/purchase', async (req: GatewayRequest, res: Response): Promise<void> => {
   try {
     const { apiId } = req.body;
     const wallet = req.wallet;
 
-    // Validation: wallet header
+    // Validation: wallet
     if (!wallet || !isValidSolanaAddress(wallet)) {
       res.status(401).json({ error: 'Valid wallet required (X-Wallet header)' });
       return;
@@ -144,35 +141,47 @@ router.post('/purchase', async (req: GatewayRequest, res: Response): Promise<voi
       return;
     }
 
-    // Check if API exists
-    if (!apiRegistry[apiId]) {
-      res.status(404).json({ error: 'API not found' });
+    const buyerPubkey = new PublicKey(wallet);
+    const registryPda = new PublicKey(apiId);
+
+    // Fetch registry to verify it exists
+    const registry = await getApiRegistry(registryPda);
+
+    if (registry.paused) {
+      res.status(403).json({ error: 'API is paused' });
       return;
     }
 
-    // Generate access key
-    const accessKey = Keypair.generate().publicKey.toString();
+    // Call smart contract to purchase access
+    const { accessKeyPda } = await purchaseAccessOnChain(
+      buyerPubkey,
+      registryPda,
+      registryPda
+    );
 
-    console.log(`[PURCHASE] Wallet: ${wallet}, API: ${apiId}, Key: ${accessKey}`);
+    console.log(`[PURCHASE] Buyer: ${wallet}, API: ${apiId}, Access Key: ${accessKeyPda}`);
 
     res.status(201).json({
       apiId,
+      accessKey: accessKeyPda,
       wallet,
-      accessKey,
       active: true,
-      callsRemaining: apiRegistry[apiId].rateLimit * 60,
+      callsRemaining: registry.rateLimit * 60,
+      price: registry.pricePerCall,
       createdAt: new Date().toISOString(),
+      message: 'Access key created. Sign the transaction to purchase access.',
     });
   } catch (error: unknown) {
     console.error('Purchase error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    const message = error instanceof Error ? error.message : 'Internal server error';
+    res.status(500).json({ error: message });
   }
 });
 
 /**
- * Check access for wallet
+ * Check access for wallet (queries on-chain)
  */
-router.get('/access/:apiId', async (req: GatewayRequest, res: Response): Promise<void> => {
+router.get('/api/access/:apiId', async (req: GatewayRequest, res: Response): Promise<void> => {
   try {
     const { apiId } = req.params;
     const wallet = req.wallet;
@@ -189,22 +198,35 @@ router.get('/access/:apiId', async (req: GatewayRequest, res: Response): Promise
       return;
     }
 
-    // Check if API exists
-    if (!apiRegistry[apiId]) {
-      res.status(404).json({ error: 'API not found' });
-      return;
+    const walletPubkey = new PublicKey(wallet);
+    const registryPda = new PublicKey(apiId);
+
+    // Verify access key on-chain
+    const hasAccess = await verifyAccessKeyOnChain(walletPubkey, registryPda);
+
+    if (hasAccess) {
+      // Fetch access key details
+      const accessKeyPda = await deriveAccessKeyPda(registryPda, walletPubkey);
+      const accessKey = await getAccessKey(accessKeyPda);
+
+      res.json({
+        apiId,
+        wallet,
+        hasAccess: true,
+        callsRemaining: accessKey.callsRemaining,
+        active: accessKey.active,
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      res.json({
+        apiId,
+        wallet,
+        hasAccess: false,
+        callsRemaining: 0,
+        active: false,
+        timestamp: new Date().toISOString(),
+      });
     }
-
-    // Check access
-    const hasAccess = await checkAccess(wallet, apiId);
-
-    res.json({
-      apiId,
-      wallet,
-      hasAccess,
-      rateLimitRemaining: 60,
-      timestamp: new Date().toISOString(),
-    });
   } catch (error: unknown) {
     console.error('Access check error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -212,12 +234,11 @@ router.get('/access/:apiId', async (req: GatewayRequest, res: Response): Promise
 });
 
 /**
- * Forward API request (main gateway proxy)
+ * Forward API request (main gateway proxy with on-chain logging)
  */
-router.all('/api/:apiId', async (req: GatewayRequest, res: Response): Promise<void> => {
+router.all('/api/:apiId/:path', async (req: GatewayRequest, res: Response): Promise<void> => {
   try {
-    const { apiId } = req.params;
-    const path: string = (req.params as Record<string, string>)[0] || '';
+    const { apiId, path } = req.params;
     const wallet = req.wallet;
 
     // Validation: wallet
@@ -232,11 +253,8 @@ router.all('/api/:apiId', async (req: GatewayRequest, res: Response): Promise<vo
       return;
     }
 
-    // Check API exists
-    if (!apiRegistry[apiId]) {
-      res.status(404).json({ error: 'API not found' });
-      return;
-    }
+    const walletPubkey = new PublicKey(wallet);
+    const registryPda = new PublicKey(apiId);
 
     // Verify signature if provided
     if (req.signature && req.message) {
@@ -247,24 +265,32 @@ router.all('/api/:apiId', async (req: GatewayRequest, res: Response): Promise<vo
       }
     }
 
-    // Check access
-    const hasAccess = await checkAccess(wallet, apiId);
+    // Verify access on-chain
+    const hasAccess = await verifyAccessKeyOnChain(walletPubkey, registryPda);
     if (!hasAccess) {
       res.status(403).json({ error: 'No access to this API' });
       return;
     }
 
+    // Get registry to check rate limit
+    const registry = await getApiRegistry(registryPda);
+
     // Check rate limit
-    const withinLimit = checkRateLimit(wallet, apiRegistry[apiId].rateLimit);
+    const withinLimit = checkRateLimit(wallet, registry.rateLimit);
     if (!withinLimit) {
       res.status(429).json({ error: 'Rate limit exceeded' });
       return;
     }
 
-    // Log usage
-    await logUsageOnChain(apiId, wallet, 1);
+    // Log usage on-chain (async, fire-and-forget)
+    const accessKeyPda = await deriveAccessKeyPda(registryPda, walletPubkey);
+    logUsageOnChain(registryPda, accessKeyPda, 1).catch(err => {
+      console.error('Failed to log usage:', err);
+    });
 
-    // TODO: In production, forward to actual backend
+    console.log(`[PROXY] API: ${apiId}, Wallet: ${wallet}, Path: ${path}`);
+
+    // TODO: Forward to actual backend API
     // For MVP: Return mock response
     res.json({
       status: 'ok',
@@ -273,18 +299,20 @@ router.all('/api/:apiId', async (req: GatewayRequest, res: Response): Promise<vo
       path,
       method: req.method,
       timestamp: new Date().toISOString(),
-      message: 'Request proxied successfully',
+      message: 'Request proxied successfully (mock response)',
+      earnings: `${(parseInt(registry.pricePerCall) / LAMPORTS_PER_SOL).toFixed(8)} SOL`,
     });
   } catch (error: unknown) {
     console.error('Proxy error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    const message = error instanceof Error ? error.message : 'Internal server error';
+    res.status(500).json({ error: message });
   }
 });
 
 /**
- * Withdraw earnings
+ * Withdraw earnings (calls smart contract)
  */
-router.post('/withdraw', (req: GatewayRequest, res: Response): void => {
+router.post('/api/withdraw', async (req: GatewayRequest, res: Response): Promise<void> => {
   try {
     const { apiId, amount } = req.body;
     const wallet = req.wallet;
@@ -307,15 +335,19 @@ router.post('/withdraw', (req: GatewayRequest, res: Response): void => {
       return;
     }
 
-    // Check API exists
-    if (!apiRegistry[apiId]) {
-      res.status(404).json({ error: 'API not found' });
+    const ownerPubkey = new PublicKey(wallet);
+    const registryPda = new PublicKey(apiId);
+
+    // Fetch registry to verify ownership
+    const registry = await getApiRegistry(registryPda);
+
+    if (registry.owner !== wallet) {
+      res.status(403).json({ error: 'Not authorized to withdraw' });
       return;
     }
 
-    // Check ownership
-    if (apiRegistry[apiId].owner !== wallet) {
-      res.status(403).json({ error: 'Not authorized to withdraw' });
+    if (parseInt(registry.totalEarnings) < amount) {
+      res.status(400).json({ error: 'Insufficient earnings' });
       return;
     }
 
@@ -332,17 +364,19 @@ router.post('/withdraw', (req: GatewayRequest, res: Response): void => {
       txId,
       status: 'success',
       timestamp: new Date().toISOString(),
+      message: 'Sign the transaction to withdraw earnings.',
     });
   } catch (error: unknown) {
     console.error('Withdrawal error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    const message = error instanceof Error ? error.message : 'Internal server error';
+    res.status(500).json({ error: message });
   }
 });
 
 /**
- * Get API statistics
+ * Get API statistics (queries on-chain)
  */
-router.get('/stats/:apiId', async (req: GatewayRequest, res: Response): Promise<void> => {
+router.get('/api/stats/:apiId', async (req: GatewayRequest, res: Response): Promise<void> => {
   try {
     const { apiId } = req.params;
     const wallet = req.wallet;
@@ -359,36 +393,34 @@ router.get('/stats/:apiId', async (req: GatewayRequest, res: Response): Promise<
       return;
     }
 
-    // Check API exists
-    if (!apiRegistry[apiId]) {
-      res.status(404).json({ error: 'API not found' });
-      return;
-    }
+    const registryPda = new PublicKey(apiId);
 
-    // Check ownership
-    if (apiRegistry[apiId].owner !== wallet) {
+    // Fetch registry data
+    const registry = await getApiRegistry(registryPda);
+
+    // Verify ownership
+    if (registry.owner !== wallet) {
       res.status(403).json({ error: 'Not authorized' });
       return;
     }
 
-    const api = apiRegistry[apiId];
-
-    // TODO: In production, query contract for real stats
     res.json({
       apiId,
-      name: api.name,
-      owner: api.owner,
-      rateLimit: api.rateLimit,
-      pricePerCall: api.pricePerCall,
-      totalCalls: 1250,
-      totalEarnings: 6250000,
-      activeKeys: 42,
-      createdAt: api.createdAt,
+      name: registry.name,
+      owner: registry.owner,
+      rateLimit: registry.rateLimit,
+      pricePerCall: registry.pricePerCall,
+      pricePerCallInSOL: (parseInt(registry.pricePerCall) / LAMPORTS_PER_SOL).toFixed(8),
+      totalCalls: registry.totalCalls,
+      totalEarnings: registry.totalEarnings,
+      totalEarningsInSOL: (parseInt(registry.totalEarnings) / LAMPORTS_PER_SOL).toFixed(8),
+      paused: registry.paused,
       timestamp: new Date().toISOString(),
     });
   } catch (error: unknown) {
     console.error('Stats error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    const message = error instanceof Error ? error.message : 'Internal server error';
+    res.status(500).json({ error: message });
   }
 });
 
