@@ -19,7 +19,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 app.use(parseAuthHeaders);
-app.use('/api', routes);
+app.use(routes);
 
 app.use((req: Request, res: Response) => {
   res.status(404).json({ error: 'Not found' });
